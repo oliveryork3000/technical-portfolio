@@ -1,0 +1,167 @@
+# capacity_allocation_simulator.py
+# Personal Portfolio - Data Center Capacity Simulator
+# Demonstrates: Multi-constraint optimization (Power/Cooling) & SLA-aware prioritization
+
+"""
+SCENARIO:
+A data center zone has limited power/cooling capacity during a constraint event
+(e.g., cooling system failure, power grid brownout, or AI training rack density spikes). 
+Multiple workloads compete:
+
+- Production traffic (P0: Critical, SLA-bound, user-facing)
+- Batch processing (P1: Deferrable but revenue-impacting)
+- Research/ML training jobs (P2: Best-effort, interruptible)
+
+This simulator models rack-level allocation strategies under physical constraints.
+
+TECHNICAL CONCEPTS DEMONSTRATED:
+- Multi-constraint optimization (power kW + cooling tons)
+- SLA-aware prioritization with penalty costs
+- Trade-off analysis (throughput vs reliability)
+- Failure scenario modeling
+
+GOOGLE/AWS/META RELEVANCE:
+TPMs managing data center operations face this exact problem: when physical capacity
+is limited, how do you allocate scarce resources to minimize business impact while preserving SLAs?
+
+NOTE: Real implementations include additional constraints (network bandwidth,
+fault tolerance requirements, thermal management). This focuses on power/cooling
+as the primary teaching example.
+"""
+
+from dataclasses import dataclass, field
+from typing import List, Dict, Literal, Optional
+import logging
+
+# Configure Logging
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
+
+@dataclass
+class Workload:
+    name: str
+    priority: Literal["P0", "P1", "P2"]  # P0 = Critical
+    power_watts: float
+    revenue_per_hour: float
+    requires_high_availability: bool
+
+@dataclass
+class DataCenterZone:
+    zone_id: str
+    max_power_kw: float
+    max_cooling_tons: float
+    current_power_kw: float = 0.0
+    current_cooling_tons: float = 0.0
+    allocated_workloads: List[str] = field(default_factory=list)
+
+class CapacityAllocator:
+    """
+    Allocates workloads to zones under physical constraints.
+    Logic: P0 (SLA) > Revenue Optimization > Best Effort.
+    """
+    
+    def __init__(self, zones: List[DataCenterZone], workloads: List[Workload]):
+        self.zones = zones
+        self.workloads = workloads
+
+    def allocate(self, constraint_mode: Literal["power", "cooling", "both"]) -> Dict:
+        """
+        Runs the allocation logic.
+        Returns a dict containing the plan and impact analysis.
+        """
+        # 1. Sort by Priority (P0), then by Revenue Density (Revenue / Power)
+        sorted_workloads = sorted(
+            self.workloads, 
+            key=lambda w: (
+                0 if w.priority == "P0" else 1 if w.priority == "P1" else 2,
+                -(w.revenue_per_hour / w.power_watts)
+            )
+        )
+
+        violations = []
+        revenue_loss = 0.0
+        
+        # Reset Zones
+        for z in self.zones:
+            z.current_power_kw = 0.0
+            z.current_cooling_tons = 0.0
+            z.allocated_workloads = []
+
+        # 2. Placement Logic
+        for workload in sorted_workloads:
+            placed = False
+            for zone in self.zones:
+                if self._can_fit(workload, zone, constraint_mode):
+                    self._commit_allocation(workload, zone)
+                    placed = True
+                    break
+            
+            if not placed:
+                violations.append(workload.name)
+                revenue_loss += workload.revenue_per_hour
+                if workload.priority == "P0":
+                    logger.warning(f"CRITICAL SLA VIOLATION: Could not place {workload.name}")
+
+        return {
+            "allocated_zones": {z.zone_id: z.allocated_workloads for z in self.zones},
+            "unplaced_workloads": violations,
+            "total_revenue_loss_hourly": revenue_loss,
+            "constraint_mode": constraint_mode
+        }
+
+    def _can_fit(self, workload: Workload, zone: DataCenterZone, mode: str) -> bool:
+        """
+        Checks if workload fits within zone's physical constraints.
+        
+        Args:
+            workload: The workload to place
+            zone: Target data center zone
+            mode: Which constraint to check ("power", "cooling", "both")
+        
+        Returns:
+            True if workload can be placed without exceeding limits
+        """
+        # Convert Watts to kW
+        req_kw = workload.power_watts / 1000.0
+        # Estimate Cooling: ~1 Ton cooling per 12 kW power draw (Industry Standard for efficient DCs)
+        req_tons = req_kw / 12.0
+
+        power_ok = (zone.current_power_kw + req_kw) <= zone.max_power_kw
+        cooling_ok = (zone.current_cooling_tons + req_tons) <= zone.max_cooling_tons
+
+        if mode == "power": return power_ok
+        if mode == "cooling": return cooling_ok
+        return power_ok and cooling_ok
+
+    def _commit_allocation(self, workload: Workload, zone: DataCenterZone):
+        """Update zone capacity after placement."""
+        req_kw = workload.power_watts / 1000.0
+        req_tons = req_kw / 12.0
+        
+        zone.current_power_kw += req_kw
+        zone.current_cooling_tons += req_tons
+        zone.allocated_workloads.append(workload.name)
+
+# --- Simulation Run ---
+if __name__ == "__main__":
+    # Example: Power-constrained zone with mixed general-purpose and AI workloads
+    zones = [
+        DataCenterZone("us-east-1a", max_power_kw=50.0, max_cooling_tons=4.0), # Restricted
+        DataCenterZone("us-east-1b", max_power_kw=200.0, max_cooling_tons=16.0) 
+    ]
+    
+    # Define competing workloads (Rack/Cluster Scale)
+    workloads = [
+        Workload("Search-Index-Rack-A", "P0", 50000, 10000, True),     # 50kW rack
+        Workload("AI-Training-Rack-GPUs", "P1", 100000, 8000, True),   # 100kW high-density rack (liquid-cooled candidate)
+        Workload("Ads-Bidding-Rack-B", "P0", 40000, 15000, True),      # 40kW rack
+        Workload("ML-Training-Cluster", "P2", 80000, 200, False),      # 80kW cluster
+        Workload("Analytics-Ingest-Shard", "P1", 20000, 5000, False),  # 20kW shard
+    ]
+
+    sim = CapacityAllocator(zones, workloads)
+    result = sim.allocate(constraint_mode="power")
+    
+    print("\n--- Simulation Results ---")
+    print(f"Unplaced Workloads: {result['unplaced_workloads']}")
+    print(f"Hourly Revenue Impact: ${result['total_revenue_loss_hourly']:,.2f}")
