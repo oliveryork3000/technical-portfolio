@@ -1,0 +1,231 @@
+# product_line_manager_agent.py
+# Personal Portfolio - Hybrid Decision Architecture
+# Context: High-Stakes Resource Allocation under Constraints
+
+"""
+BUSINESS CONTEXT:
+During infrastructure crisis scenarios (e.g., 30% capacity loss from cooling failure,
+power constraints, or unexpected traffic spikes), operations leaders must balance:
+- SLA obligations (contractual uptime guarantees)
+- Revenue preservation (prioritizing high-value workloads)
+- Strategic fairness (maintaining relationships with all customers)
+
+Pure automation is risky (no human judgment). Pure manual decision-making is too slow.
+
+TECHNICAL APPROACH - HYBRID DECISION ARCHITECTURE:
+This agent demonstrates a pattern applicable to any high-stakes resource allocation
+problem (data center capacity, cloud quota management, network bandwidth rationing):
+
+1. **Deterministic Layer (Python)**: Calculates mathematically sound allocations based
+   on explicit priority rules. This is the "ground truth."
+   
+2. **Narrative Layer (LLM)**: Generates human-readable trade-off analysis, risk
+   assessment, and qualitative reasoning. This is the "explanation."
+   
+3. **Integrity Layer (Python)**: Validates that the LLM didn't hallucinate or alter
+   the critical numerical allocations. This prevents AI drift from affecting outcomes.
+
+INFRASTRUCTURE USE CASES:
+- Server capacity allocation during data center power outages
+- TPU/GPU quota management during high-demand AI training surges
+- Kubernetes resource quota enforcement during node failures
+- Cloud compute allocation across availability zones during regional incidents
+- Network bandwidth rationing during DDoS mitigation
+"""
+
+from langgraph.graph import StateGraph, END
+from pydantic import BaseModel, Field
+from typing import List, Literal, Optional, Dict, Any
+import logging
+
+# [Architecture] Unified LLM factory import pattern
+try:
+    from utils.llm_factory import get_llm
+except ImportError:
+    from llm_factory import get_llm
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# ============================
+# 1. SCHEMAS (Generalized for Infrastructure)
+# ============================
+
+class ResourceRequest(BaseModel):
+    requestor_id: str
+    type: Literal["SLA_Guaranteed", "Internal_Best_Effort", "Spot_Market", "New_Allocation"]
+    units_requested: int
+    revenue_impact_per_unit: float  # Revenue or business value per unit
+    priority_tier: Literal["P0_Critical", "P1_High", "P2_BestEffort"]
+    sla_penalty_cost: float = 0.0
+    strategic_importance_score: float = 0.0  # 0.0-1.0, LTV or strategic weight
+
+class ConstraintContext(BaseModel):
+    constraint_id: str
+    available_capacity: int
+    total_demand: int
+    resource_requests: List[ResourceRequest]
+
+class RecommendationOption(BaseModel):
+    title: str
+    description: str
+    allocation_breakdown: Dict[str, int]  # requestor_id -> units allocated
+    pros: List[str]
+    cons: List[str]
+    risks_and_unknowns: List[str]
+    confidence_level: Literal["High", "Medium", "Low"]
+    estimated_impact: Dict[str, str]
+    required_validation: List[str]
+
+class DecisionRecommendation(BaseModel):
+    immediate_action: str = "Pending Analysis"
+    long_term_action: str = "Monitor outcomes"
+    requires_human_review: bool = True
+    severity: Literal["Low", "Medium", "High"] = "Medium"
+    options: List[RecommendationOption] = Field(default_factory=list)
+
+class AllocatorState(BaseModel):
+    client_id: str
+    constraint_context: Optional[ConstraintContext] = None
+    recommendation: DecisionRecommendation = Field(default_factory=DecisionRecommendation)
+
+# ============================
+# 2. NODES
+# ============================
+
+def allocation_logic_node(state: AllocatorState) -> dict:
+    """
+    ARCHITECTURE: HYBRID INTELLIGENCE
+    Relevant to hyperscale incident response: ensures SLA-bound production workloads
+    (search, ads, AI inference) are protected while providing explainable trade-offs.
+    
+    1. Python calculates deterministic allocations (The Math).
+    2. LLM refines the narrative/qualitative aspects (The Story).
+    3. Python enforces integrity of the allocations (The Guardrail).
+    """
+    ctx = state.constraint_context
+    if not ctx:
+        return {}
+
+    logger.info(f"[Allocator] Allocating {ctx.available_capacity} units against {ctx.total_demand} demand")
+
+    # --- 1. Python Deterministic Scoring (The "Math" Layer) ---
+    scored = []
+    for req in ctx.resource_requests:
+        score = 0.0
+        # Priority Hierarchy: SLA-bound workloads > Revenue-generating > Best-effort
+        if req.type == "SLA_Guaranteed": 
+            score += 1000 # SLA violations have severe business impact
+        elif req.type == "Internal_Best_Effort": 
+            score += 500 # Internal workloads important but deferrable
+        
+        # Spot market gets baseline score (lowest priority)
+        
+        # Value Weight
+        score += req.revenue_impact_per_unit * 10
+        score += req.strategic_importance_score * 200
+        score += req.sla_penalty_cost / 100
+        
+        scored.append((req, score))
+
+    priority_sorted = sorted(scored, key=lambda x: x[1], reverse=True)
+
+    # --- 2. Generate Deterministic Options ---
+    capacity = ctx.available_capacity
+    options = []
+
+    # Option A: Strict SLA Protection (Protect the Core)
+    alloc_a = {}
+    remaining = capacity
+    for req, _ in priority_sorted:
+        alloc = min(req.units_requested, remaining)
+        alloc_a[req.requestor_id] = alloc
+        remaining -= alloc
+    
+    options.append(RecommendationOption(
+        title="Protect Critical SLAs",
+        description="Priority-based allocation (P0 production workloads > P1 internal > P2 batch jobs). Analogous to preserving user-facing services during capacity constraints.",
+        allocation_breakdown=alloc_a,
+        pros=["Minimizes SLA penalties", "Protects Critical Workloads"],
+        cons=["Starves spot instances", "May delay internal dev queues"],
+        risks_and_unknowns=["Spot users may migrate providers"],
+        confidence_level="High",
+        estimated_impact={"penalty_risk": "Low", "utilization": "Maximized"},
+        required_validation=["Legal review"]
+    ))
+
+    # Option B: Fair Share (Pro-Rata)
+    ratio = capacity / ctx.total_demand if ctx.total_demand > 0 else 0
+    alloc_b = {r.requestor_id: int(r.units_requested * ratio) for r in ctx.resource_requests}
+    
+    options.append(RecommendationOption(
+        title="Fair Share Allocation",
+        description=f"Universal cut. Everyone receives {ratio:.0%} of request.",
+        allocation_breakdown=alloc_b,
+        pros=["Perceived fairness", "Keeps all queues moving"],
+        cons=["Violates P0 SLAs", "Sub-optimal for critical jobs"],
+        risks_and_unknowns=["Major SLA credits triggered"],
+        confidence_level="Medium",
+        estimated_impact={"penalty_risk": "High", "stakeholder_satisfaction": "Medium"},
+        required_validation=["Executive Override"]
+    ))
+
+    # --- 3. LLM Enhancement with INTEGRITY CHECK (The "Guardrail" Layer) ---
+    # --- CRITICAL: HALLUCINATION PREVENTION LAYER ---
+    # In production systems where LLMs augment critical decisions, we must
+    # enforce mathematical integrity. The LLM explains *why*, but Python controls *how much*.
+
+    llm = get_llm(model="gpt-4o", temperature=0.4, client_id=state.client_id)
+    prompt = f"""
+    You are a Capacity Planning Architect handling a critical constraint event.
+    Constraint: {ctx.constraint_id}
+    Shortfall: {ctx.total_demand - ctx.available_capacity} units
+    
+    Deterministic Options Generated (The Math is fixed):
+    {options}
+    
+    Refine the NARRATIVE for these options.
+    CRITICAL INSTRUCTION: DO NOT CHANGE THE 'allocation_breakdown' NUMBERS.
+    
+    Output refined DecisionRecommendation.
+    """
+    try:
+        refined = llm.with_structured_output(DecisionRecommendation).invoke(prompt)
+        
+        # SECURITY: Structure Check
+        if len(refined.options) != len(options):
+            refined.options = refined.options[:len(options)]
+
+        # SECURITY: Integrity Loop
+        for i, det_opt in enumerate(options):
+            if i >= len(refined.options):
+                refined.options.append(det_opt)
+                continue
+            
+            llm_opt = refined.options[i]
+            
+            # Compare critical math
+            if llm_opt.allocation_breakdown != det_opt.allocation_breakdown:
+                logger.warning(f"[Security] DETECTED HALLUCINATION in Option {i+1}. Reverting to deterministic math.")
+                llm_opt.allocation_breakdown = det_opt.allocation_breakdown
+
+        state.recommendation = refined
+
+    except Exception as e:
+        logger.error(f"[Allocator] LLM refine failed: {e}")
+        state.recommendation.options = options
+
+    state.recommendation.requires_human_review = True
+    state.recommendation.severity = "High"
+
+    return {"recommendation": state.recommendation}
+
+# ============================
+# 3. GRAPH
+# ============================
+
+workflow = StateGraph(AllocatorState)
+workflow.add_node("allocator", allocation_logic_node)
+workflow.set_entry_point("allocator")
+workflow.add_edge("allocator", END)
+app = workflow.compile()
